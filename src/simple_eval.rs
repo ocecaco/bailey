@@ -1,4 +1,4 @@
-use crate::syntax::Expr;
+use crate::syntax::{BinOp, Constant, Expr};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -134,6 +134,8 @@ impl Heap {
             .heap_value
     }
 
+    // TODO: Reference counting is not actively used for now in the
+    // interpreter since there was a bug with destruction of intermediate values.
     fn inc_refcount(&mut self, heap_address: HeapAddress) {
         let refcounted = &mut self.memory.get_mut(&heap_address).expect("invalid pointer");
         refcounted.refcount += 1;
@@ -161,20 +163,50 @@ impl SimpleEvaluator {
         SimpleEvaluator { heap: Heap::new() }
     }
 
+    fn eval_binop(
+        &mut self,
+        op: BinOp,
+        lhs_addr: HeapAddress,
+        rhs_addr: HeapAddress,
+    ) -> HeapAddress {
+        match op {
+            BinOp::Add => {
+                let lhs_value = self.heap.deref(lhs_addr).check_int();
+                let rhs_value = self.heap.deref(rhs_addr).check_int();
+                self.heap.alloc(HeapValue::Int(lhs_value + rhs_value))
+            }
+            BinOp::Sub => {
+                let lhs_value = self.heap.deref(lhs_addr).check_int();
+                let rhs_value = self.heap.deref(rhs_addr).check_int();
+                self.heap.alloc(HeapValue::Int(lhs_value - rhs_value))
+            }
+            BinOp::Eq => {
+                let lhs_value = self.heap.deref(lhs_addr).check_int();
+                let rhs_value = self.heap.deref(rhs_addr).check_int();
+                self.heap.alloc(HeapValue::Bool(lhs_value == rhs_value))
+            }
+            BinOp::Get => {
+                let tuple = self.heap.deref(lhs_addr).check_tuple();
+                let index = self.heap.deref(rhs_addr).check_int();
+
+                match tuple.field_values.get(index as usize) {
+                    Some(value) => *value,
+                    None => panic!("field index out of range"),
+                }
+            }
+        }
+    }
+
     fn eval(&mut self, env: &Environment, e: &Expr) -> HeapAddress {
         match e {
-            Expr::ConstInt { value } => self.heap.alloc(HeapValue::Int(*value)),
-            Expr::ConstBool { value } => self.heap.alloc(HeapValue::Bool(*value)),
+            Expr::Literal(Constant::Int { value }) => self.heap.alloc(HeapValue::Int(*value)),
+            Expr::Literal(Constant::Bool { value }) => self.heap.alloc(HeapValue::Bool(*value)),
             Expr::Tuple { values } => {
                 let mut field_values = Vec::new();
 
                 for v in values {
                     let value_addr = self.eval(env, v);
                     field_values.push(value_addr);
-                }
-
-                for value_addr in &field_values {
-                    self.heap.inc_refcount(*value_addr);
                 }
 
                 self.heap.alloc(HeapValue::Tuple(Tuple { field_values }))
@@ -184,10 +216,6 @@ impl SimpleEvaluator {
                 arg_names,
                 body,
             } => {
-                for value_addr in env.values() {
-                    self.heap.inc_refcount(*value_addr);
-                }
-
                 self.heap.alloc(HeapValue::Closure(Closure {
                     name: name.clone(),
                     arg_names: arg_names.clone(),
@@ -197,7 +225,7 @@ impl SimpleEvaluator {
                     body: body.as_ref().clone(),
                 }))
             }
-            Expr::Var { name } => *env.get(name).expect("unknown variable"),
+            Expr::Var { var_name } => *env.get(var_name).expect("unknown variable"),
             Expr::Call { func, args } => {
                 let closure_address = self.eval(env, func);
 
@@ -258,35 +286,10 @@ impl SimpleEvaluator {
 
                 result
             }
-            Expr::Add { lhs, rhs } => {
+            Expr::BinOp { op, lhs, rhs } => {
                 let lhs_address = self.eval(env, lhs);
                 let rhs_address = self.eval(env, rhs);
-                let lhs_value = self.heap.deref(lhs_address).check_int();
-                let rhs_value = self.heap.deref(rhs_address).check_int();
-                self.heap.alloc(HeapValue::Int(lhs_value + rhs_value))
-            }
-            Expr::Sub { lhs, rhs } => {
-                let lhs_address = self.eval(env, lhs);
-                let rhs_address = self.eval(env, rhs);
-                let lhs_value = self.heap.deref(lhs_address).check_int();
-                let rhs_value = self.heap.deref(rhs_address).check_int();
-                self.heap.alloc(HeapValue::Int(lhs_value - rhs_value))
-            }
-            Expr::Eq { lhs, rhs } => {
-                let lhs_address = self.eval(env, lhs);
-                let rhs_address = self.eval(env, rhs);
-                let lhs_value = self.heap.deref(lhs_address).check_int();
-                let rhs_value = self.heap.deref(rhs_address).check_int();
-                self.heap.alloc(HeapValue::Bool(lhs_value == rhs_value))
-            }
-            Expr::Get { tuple, index } => {
-                let tuple_address = self.eval(env, tuple);
-                let tuple = self.heap.deref(tuple_address).check_tuple();
-
-                match tuple.field_values.get(*index as usize) {
-                    Some(addr) => *addr,
-                    None => panic!("tuple index out of range during access"),
-                }
+                self.eval_binop(*op, lhs_address, rhs_address)
             }
             Expr::Set {
                 tuple,
@@ -300,11 +303,7 @@ impl SimpleEvaluator {
                 let tuple = self.heap.deref_mut(tuple_address).check_tuple_mut();
 
                 if (*index as usize) < tuple.field_values.len() {
-                    let old_value = tuple.field_values[*index as usize];
                     tuple.field_values[*index as usize] = new_value;
-                    // The ordering here is important: when new_value == old_value and the reference count is 1, we do not want to free the block. If we would decrement first, then it would get freed.
-                    self.heap.inc_refcount(new_value);
-                    self.heap.dec_refcount(old_value);
                 } else {
                     panic!("tuple index out of range during mutation");
                 }
