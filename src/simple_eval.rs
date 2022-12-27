@@ -87,7 +87,7 @@ impl Heap {
         let address = self.heap_next_address;
         self.heap_next_address = HeapAddress(self.heap_next_address.0 + 1);
         let refcounted = RefCountedHeapValue {
-            refcount: 1,
+            refcount: 0,
             heap_value,
         };
         self.memory.insert(address, refcounted);
@@ -187,10 +187,10 @@ impl BlockFrame {
         }
     }
 
-    fn set_var(&mut self, name: &str, value: HeapAddress) {
+    fn set_var(&mut self, name: String, value: HeapAddress) {
         let new_offset = self.values.len();
         self.values.push(value);
-        self.variable_offsets.insert(name.to_owned(), new_offset);
+        self.variable_offsets.insert(name, new_offset);
     }
 }
 
@@ -233,7 +233,7 @@ impl CallStackFrame {
         panic!("could not find variable in stack frame")
     }
 
-    fn set_var(&mut self, name: &str, value: HeapAddress) {
+    fn set_var_no_refcount(&mut self, name: String, value: HeapAddress) {
         self.current_block_mut().set_var(name, value);
     }
 }
@@ -279,6 +279,13 @@ impl SimpleEvaluator {
             heap: Heap::new(),
             stack: Stack::new(),
         }
+    }
+
+    fn set_var(&mut self, name: String, address: HeapAddress) {
+        self.heap.inc_refcount(address);
+        self.stack
+            .current_frame_mut()
+            .set_var_no_refcount(name, address);
     }
 
     fn eval_binop(
@@ -331,6 +338,10 @@ impl SimpleEvaluator {
                     field_values.push(value_addr);
                 }
 
+                for addr in &field_values {
+                    self.heap.inc_refcount(*addr);
+                }
+
                 self.heap.alloc(HeapValue::Tuple(Tuple { field_values }))
             }
             LetExprC::Fun(LetFunction {
@@ -342,10 +353,13 @@ impl SimpleEvaluator {
                 let mut closure_environment = HashMap::new();
 
                 for free_name in free_names {
-                    closure_environment.insert(
-                        free_name.clone(),
-                        self.stack.current_frame().lookup_var(free_name),
-                    );
+                    let value_addr = self.stack.current_frame().lookup_var(free_name);
+
+                    closure_environment.insert(free_name.clone(), value_addr);
+                }
+
+                for value_addr in closure_environment.values() {
+                    self.heap.inc_refcount(*value_addr);
                 }
 
                 self.heap.alloc(HeapValue::Closure(Closure {
@@ -377,19 +391,17 @@ impl SimpleEvaluator {
                 self.stack.enter_function();
 
                 for (name, value) in closure.environment.iter() {
-                    self.stack.current_frame_mut().set_var(name, *value);
+                    self.set_var(name.clone(), *value);
                 }
 
                 for (name, arg_value) in closure.arg_names.iter().zip(arg_values) {
-                    self.stack.current_frame_mut().set_var(name, arg_value);
+                    self.set_var(name.clone(), arg_value);
                 }
 
                 // Allow the function to recursively calling itself by inserting
                 // a pointer to its own closure into its environment when
                 // calling it.
-                self.stack
-                    .current_frame_mut()
-                    .set_var(&closure.name, closure_address);
+                self.set_var(closure.name.clone(), closure_address);
 
                 let result = self.eval_block(&closure.body);
 
@@ -415,7 +427,13 @@ impl SimpleEvaluator {
                 let tuple = self.heap.deref_mut(tuple_address).check_tuple_mut();
 
                 if (*index as usize) < tuple.field_values.len() {
+                    let old_value = tuple.field_values[*index as usize];
                     tuple.field_values[*index as usize] = new_value;
+
+                    // Ordering is important here, because in case new_value == old_value we do
+                    // not want to destroy the value we are assigning, as would happen when we swap the lines.
+                    self.heap.inc_refcount(new_value);
+                    self.heap.dec_refcount(old_value);
                 } else {
                     panic!("tuple index out of range during mutation");
                 }
@@ -459,9 +477,7 @@ impl SimpleEvaluator {
         for instruction in initial_instructions {
             let new_var_value = self.eval_rhs(&instruction.definition);
 
-            self.stack
-                .current_frame_mut()
-                .set_var(&instruction.name, new_var_value);
+            self.set_var(instruction.name.clone(), new_var_value);
         }
 
         let block_return_value = self.eval_rhs(&last_instruction.definition);
