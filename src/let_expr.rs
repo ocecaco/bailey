@@ -2,26 +2,26 @@ use std::collections::HashSet;
 
 use crate::syntax::{BinOp, Constant};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LetExpr {
     // The last let binding represents the result of evaluating the
     // entire sequence of let expressions.
     pub let_bindings: Vec<LetBinding>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LetBinding {
     pub name: String,
     pub definition: LetExprB,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum LetExprB {
     Complex(LetExprC),
     Atomic(LetExprA),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LetFunction {
     pub name: String,
     pub arg_names: Vec<String>,
@@ -29,7 +29,7 @@ pub struct LetFunction {
     pub body: Box<LetExpr>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum LetExprC {
     Literal(Constant),
     Fun(LetFunction),
@@ -57,7 +57,7 @@ pub enum LetExprC {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LetExprA {
     pub var_name: String,
 }
