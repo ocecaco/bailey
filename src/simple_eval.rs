@@ -64,8 +64,13 @@ impl HeapValue {
     }
 }
 
+struct RefCountedHeapValue {
+    refcount: u32,
+    heap_value: HeapValue,
+}
+
 struct Heap {
-    memory: HashMap<HeapAddress, HeapValue>,
+    memory: HashMap<HeapAddress, RefCountedHeapValue>,
     heap_next_address: HeapAddress,
 }
 
@@ -80,16 +85,70 @@ impl Heap {
     fn alloc(&mut self, heap_value: HeapValue) -> HeapAddress {
         let address = self.heap_next_address;
         self.heap_next_address = HeapAddress(self.heap_next_address.0 + 1);
-        self.memory.insert(address, heap_value);
+        let refcounted = RefCountedHeapValue {
+            refcount: 1,
+            heap_value,
+        };
+        self.memory.insert(address, refcounted);
         address
     }
 
+    fn free(&mut self, heap_address: HeapAddress) {
+        let destroying_value = self
+            .memory
+            .remove(&heap_address)
+            .expect("attempt to free invalid pointer")
+            .heap_value;
+
+        match destroying_value {
+            HeapValue::Int(_) => {}
+            HeapValue::Bool(_) => {}
+            HeapValue::Tuple(Tuple { field_values }) => {
+                for addr in field_values {
+                    self.dec_refcount(addr);
+                }
+            }
+            HeapValue::Closure(Closure { environment, .. }) => {
+                for addr in environment.values() {
+                    self.dec_refcount(*addr);
+                }
+            }
+        }
+    }
+
+    fn free_env(&mut self, env: &Environment) {
+        for addr in env.values() {
+            self.dec_refcount(*addr);
+        }
+    }
+
     fn deref(&self, heap_address: HeapAddress) -> &HeapValue {
-        &self.memory[&heap_address]
+        &self.memory[&heap_address].heap_value
     }
 
     fn deref_mut(&mut self, heap_address: HeapAddress) -> &mut HeapValue {
-        self.memory.get_mut(&heap_address).expect("invalid pointer")
+        &mut self
+            .memory
+            .get_mut(&heap_address)
+            .expect("invalid pointer")
+            .heap_value
+    }
+
+    fn inc_refcount(&mut self, heap_address: HeapAddress) {
+        let refcounted = &mut self.memory.get_mut(&heap_address).expect("invalid pointer");
+        refcounted.refcount += 1;
+    }
+
+    fn dec_refcount(&mut self, heap_address: HeapAddress) {
+        let new_refcount = {
+            let refcounted = &mut self.memory.get_mut(&heap_address).expect("invalid pointer");
+            refcounted.refcount -= 1;
+            refcounted.refcount
+        };
+
+        if new_refcount == 0 {
+            self.free(heap_address);
+        }
     }
 }
 
@@ -110,7 +169,12 @@ impl SimpleEvaluator {
                 let mut field_values = Vec::new();
 
                 for v in values {
-                    field_values.push(self.eval(env, v));
+                    let value_addr = self.eval(env, v);
+                    field_values.push(value_addr);
+                }
+
+                for value_addr in &field_values {
+                    self.heap.inc_refcount(*value_addr);
                 }
 
                 self.heap.alloc(HeapValue::Tuple(Tuple { field_values }))
@@ -119,14 +183,20 @@ impl SimpleEvaluator {
                 name,
                 arg_names,
                 body,
-            } => self.heap.alloc(HeapValue::Closure(Closure {
-                name: name.clone(),
-                arg_names: arg_names.clone(),
-                // TODO: Restrict the environment to only capture the free
-                // variables of the body to prevent memory leaks.
-                environment: env.clone(),
-                body: body.as_ref().clone(),
-            })),
+            } => {
+                for value_addr in env.values() {
+                    self.heap.inc_refcount(*value_addr);
+                }
+
+                self.heap.alloc(HeapValue::Closure(Closure {
+                    name: name.clone(),
+                    arg_names: arg_names.clone(),
+                    // TODO: Restrict the environment to only capture the free
+                    // variables of the body to prevent memory leaks.
+                    environment: env.clone(),
+                    body: body.as_ref().clone(),
+                }))
+            }
             Expr::Var { name } => *env.get(name).expect("unknown variable"),
             Expr::Call { func, args } => {
                 let closure_address = self.eval(env, func);
@@ -158,7 +228,17 @@ impl SimpleEvaluator {
                 // calling it.
                 new_environment.insert(closure.name.clone(), closure_address);
 
-                self.eval(&new_environment, &closure.body)
+                let result = self.eval(&new_environment, &closure.body);
+
+                // TODO: This is right now the only trigger for freeing memory.
+                // However, it does not account for pointers that are never
+                // assigned to variables in the environment, e.g. intermediate
+                // values in expressions. Is there a way to deal with that
+                // without converting to ANF? (i.e. giving every intermediate
+                // value a name and flattening the evaluation contexts)
+                self.heap.free_env(&new_environment);
+
+                result
             }
             Expr::Let {
                 name,
@@ -172,7 +252,11 @@ impl SimpleEvaluator {
                 let definition_value = self.eval(env, definition);
                 new_environment.insert(name.clone(), definition_value);
 
-                self.eval(&new_environment, body)
+                let result = self.eval(&new_environment, body);
+
+                self.heap.free_env(&new_environment);
+
+                result
             }
             Expr::Add { lhs, rhs } => {
                 let lhs_address = self.eval(env, lhs);
@@ -216,7 +300,11 @@ impl SimpleEvaluator {
                 let tuple = self.heap.deref_mut(tuple_address).check_tuple_mut();
 
                 if (*index as usize) < tuple.field_values.len() {
+                    let old_value = tuple.field_values[*index as usize];
                     tuple.field_values[*index as usize] = new_value;
+                    // The ordering here is important: when new_value == old_value and the reference count is 1, we do not want to free the block. If we would decrement first, then it would get freed.
+                    self.heap.inc_refcount(new_value);
+                    self.heap.dec_refcount(old_value);
                 } else {
                     panic!("tuple index out of range during mutation");
                 }
