@@ -2,8 +2,8 @@ use crate::ir_let::interpreter::heap::Heap;
 use crate::ir_let::interpreter::heap_value::{Closure, HeapAddress, HeapValue, Tuple};
 use crate::ir_let::interpreter::stack::{ReturnInfo, Stack};
 use crate::ir_let::let_expr::{
-    Assignment, Control, Definition, Function, Instruction, Program, Simple, Step, TargetAddress,
-    VariableReference,
+    AllocClosure, Assignment, Control, Definition, Instruction, Program, Simple, Step,
+    TargetAddress, VariableReference,
 };
 use crate::lang::syntax::{BinOp, Constant};
 use std::collections::HashMap;
@@ -83,7 +83,7 @@ impl InstructionEvaluator {
 
                 self.heap.alloc(HeapValue::Tuple(Tuple { field_values }))
             }
-            Simple::Fun(Function {
+            Simple::Fun(AllocClosure {
                 name,
                 arg_names,
                 free_names,
@@ -232,6 +232,7 @@ impl ProgramEvaluator {
             program,
             instruction_evaluator: InstructionEvaluator::new(),
             program_counter: TargetAddress {
+                function_index: 0,
                 block_index: 0,
                 instruction_index: 0,
             },
@@ -253,7 +254,7 @@ impl ProgramEvaluator {
 
         let current_instruction = self.program.get_instruction(self.program_counter);
 
-        println!("instruction: {:?}", current_instruction);
+        println!("instruction: {}", current_instruction);
 
         match current_instruction {
             Instruction::EnterBlock => {

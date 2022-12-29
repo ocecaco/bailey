@@ -12,12 +12,10 @@ use crate::lang::test::fib::fib_test;
 fn main() {
     let fib_program = fib_test(10);
     let compiled_program = let_normalize(&fib_program).expect("expected program");
-    println!("{:#?}", compiled_program);
+    println!("{}", compiled_program);
 
     let mut evaluator = ProgramEvaluator::new(compiled_program);
     let result = evaluator.run();
-
-    println!("{:#?}", evaluator);
 
     println!("{:#?}", result);
 }

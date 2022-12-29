@@ -1,13 +1,14 @@
 use crate::ir_let::free_vars::FreeVars;
 use crate::ir_let::let_expr::{
-    Assignment, Block, Control, Definition, Function, Instruction, Program, Simple, Step,
-    TargetAddress, VariableReference,
+    AllocClosure, Assignment, Block, Control, Definition, Function, Instruction, Program, Simple,
+    Step, TargetAddress, VariableReference,
 };
 use crate::lang::syntax::Expr;
 use crate::result::Result;
 
 struct LetNormalizer {
     program: Program,
+    current_function_index: Option<usize>,
     current_block_index: Option<usize>,
     var_counter: u64,
 }
@@ -15,7 +16,10 @@ struct LetNormalizer {
 impl LetNormalizer {
     fn new() -> Self {
         LetNormalizer {
-            program: Program { blocks: Vec::new() },
+            program: Program {
+                functions: Vec::new(),
+            },
+            current_function_index: None,
             current_block_index: None,
             var_counter: 0,
         }
@@ -31,13 +35,16 @@ impl LetNormalizer {
     }
 
     fn emit(&mut self, instruction: Instruction) {
+        let current_function_index = self
+            .current_function_index
+            .expect("should have active function");
         let current_block_index = self.current_block_index.expect("should have active block");
-        self.program.blocks[current_block_index]
+        self.program.functions[current_function_index].blocks[current_block_index]
             .instructions
             .push(instruction);
     }
 
-    fn normalize_atom(&mut self, e: &Expr) -> Result<VariableReference> {
+    fn normalize_var(&mut self, e: &Expr) -> Result<VariableReference> {
         let norm_rhs = self.normalize_rhs(e)?;
 
         match norm_rhs {
@@ -53,6 +60,19 @@ impl LetNormalizer {
         }
     }
 
+    fn normalize_function_body(&mut self, e: &Expr) -> Result<TargetAddress> {
+        let old_function_index = self.current_function_index;
+        let new_function_index = self.program.functions.len();
+        self.program.functions.push(Function { blocks: Vec::new() });
+        self.current_function_index = Some(new_function_index);
+
+        let body_address = self.normalize_block(e)?;
+
+        self.current_function_index = old_function_index;
+
+        Ok(body_address)
+    }
+
     fn normalize_rhs(&mut self, e: &Expr) -> Result<Definition> {
         match e {
             Expr::Literal(c) => Ok(Definition::Step(Step::Simple(Simple::Literal(*c)))),
@@ -64,23 +84,28 @@ impl LetNormalizer {
                 arg_names,
                 body,
             } => {
-                let body_address = self.normalize_block(&body)?;
-                let freevars =
-                    FreeVars::free_vars_function(&self.program, &name, &arg_names, body_address);
-                let function = Function {
+                let function_body_address = self.normalize_function_body(body)?;
+
+                let freevars = FreeVars::free_vars_function(
+                    &self.program.functions[function_body_address.function_index].blocks,
+                    &name,
+                    &arg_names,
+                    function_body_address.block_index,
+                );
+                let function = AllocClosure {
                     name: name.clone(),
                     arg_names: arg_names.clone(),
                     free_names: freevars.iter().map(|&x| x.to_owned()).collect(),
-                    body: body_address,
+                    body: function_body_address,
                 };
 
                 Ok(Definition::Step(Step::Simple(Simple::Fun(function))))
             }
             Expr::Call { func, args } => {
-                let fun_at = self.normalize_atom(func)?;
+                let fun_at = self.normalize_var(func)?;
                 let mut args_at = Vec::new();
                 for arg in args {
-                    args_at.push(self.normalize_atom(arg)?);
+                    args_at.push(self.normalize_var(arg)?);
                 }
                 Ok(Definition::Step(Step::Control(Control::Call {
                     func: fun_at,
@@ -88,8 +113,8 @@ impl LetNormalizer {
                 })))
             }
             Expr::BinOp { op, lhs, rhs } => {
-                let lhs_at = self.normalize_atom(lhs)?;
-                let rhs_at = self.normalize_atom(rhs)?;
+                let lhs_at = self.normalize_var(lhs)?;
+                let rhs_at = self.normalize_var(rhs)?;
                 Ok(Definition::Step(Step::Simple(Simple::BinOp {
                     op: *op,
                     lhs: lhs_at,
@@ -113,7 +138,7 @@ impl LetNormalizer {
                 branch_success,
                 branch_failure,
             } => {
-                let cond_at = self.normalize_atom(condition)?;
+                let cond_at = self.normalize_var(condition)?;
                 let branch_success = self.normalize_block(branch_success)?;
                 let branch_failure = self.normalize_block(branch_failure)?;
                 Ok(Definition::Step(Step::Control(Control::If {
@@ -126,7 +151,7 @@ impl LetNormalizer {
                 let mut args_norm = Vec::new();
 
                 for arg in values {
-                    args_norm.push(self.normalize_atom(arg)?);
+                    args_norm.push(self.normalize_var(arg)?);
                 }
 
                 Ok(Definition::Step(Step::Simple(Simple::Tuple {
@@ -138,8 +163,8 @@ impl LetNormalizer {
                 index,
                 new_expr,
             } => {
-                let tuple_at = self.normalize_atom(tuple)?;
-                let new_at = self.normalize_atom(new_expr)?;
+                let tuple_at = self.normalize_var(tuple)?;
+                let new_at = self.normalize_var(new_expr)?;
                 Ok(Definition::Step(Step::Simple(Simple::Set {
                     tuple: tuple_at,
                     index: *index,
@@ -150,29 +175,37 @@ impl LetNormalizer {
     }
 
     fn normalize_block(&mut self, e: &Expr) -> Result<TargetAddress> {
-        let new_block_index = self.program.blocks.len();
-        self.program.blocks.push(Block {
-            instructions: Vec::new(),
-        });
+        let current_function_index = self
+            .current_function_index
+            .expect("should have active function");
+
+        let new_block_index = self.program.functions[current_function_index].blocks.len();
+        self.program.functions[current_function_index]
+            .blocks
+            .push(Block {
+                instructions: Vec::new(),
+            });
+
         // Save the current block index so we can restore it later.
         let old_block_index = self.current_block_index;
         self.current_block_index = Some(new_block_index);
 
         self.emit(Instruction::EnterBlock);
-        let result = self.normalize_atom(e)?;
+        let result = self.normalize_var(e)?;
         self.emit(Instruction::ExitBlock(result));
 
         // Restore the old current block index
         self.current_block_index = old_block_index;
 
         Ok(TargetAddress {
+            function_index: current_function_index,
             block_index: new_block_index,
             instruction_index: 0,
         })
     }
 
     fn normalize_program(mut self, e: &Expr) -> Result<Program> {
-        self.normalize_block(e)?;
+        self.normalize_function_body(e)?;
         Ok(self.program)
     }
 }

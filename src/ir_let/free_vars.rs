@@ -1,34 +1,37 @@
 use crate::ir_let::let_expr::{
-    Control, Definition, Instruction, Program, Simple, Step, TargetAddress, VariableReference,
+    Block, Control, Definition, Instruction, Simple, Step, VariableReference,
 };
 use std::collections::HashSet;
 
+// TODO: I could add some asserts to check that there are no invalid
+// interprocedural jumps in conditionals and that calls/jumps always go to the
+// first instruction of a block.
 pub struct FreeVars<'a> {
-    program: &'a Program,
+    function_blocks: &'a [Block],
     free_vars: HashSet<&'a str>,
 }
 
 impl<'a> FreeVars<'a> {
     pub fn free_vars_function(
-        program: &'a Program,
+        function_blocks: &'a [Block],
         funname: &'a str,
         argnames: &'a [String],
-        body: TargetAddress,
+        initial_block_index: usize,
     ) -> HashSet<&'a str> {
-        let mut collector = FreeVars::new(program);
-        collector.collect_function(funname, argnames, body);
+        let mut collector = FreeVars::new(function_blocks);
+        collector.collect_function(funname, argnames, initial_block_index);
         collector.done()
     }
 
-    fn new(program: &'a Program) -> Self {
+    fn new(function_blocks: &'a [Block]) -> Self {
         FreeVars {
-            program,
+            function_blocks,
             free_vars: HashSet::new(),
         }
     }
 
-    fn collect_block(&mut self, block_address: TargetAddress) {
-        let block = &self.program.blocks[block_address.block_index];
+    fn collect_block(&mut self, block_index: usize) {
+        let block = &self.function_blocks[block_index];
 
         // We iterate in reverse in order to determine the free variables of the
         // inner (nested) scopes first, because the first let binding scopes
@@ -58,8 +61,13 @@ impl<'a> FreeVars<'a> {
         }
     }
 
-    fn collect_function(&mut self, funname: &'a str, argnames: &'a [String], body: TargetAddress) {
-        self.collect_block(body);
+    fn collect_function(
+        &mut self,
+        funname: &'a str,
+        argnames: &'a [String],
+        initial_block_index: usize,
+    ) {
+        self.collect_block(initial_block_index);
 
         self.free_vars.remove(funname);
 
@@ -82,8 +90,8 @@ impl<'a> FreeVars<'a> {
                 branch_failure,
             } => {
                 self.collect_var(condition);
-                self.collect_block(*branch_success);
-                self.collect_block(*branch_failure);
+                self.collect_block(branch_success.block_index);
+                self.collect_block(branch_failure.block_index);
             }
         }
     }
