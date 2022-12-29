@@ -1,9 +1,10 @@
-use crate::let_expr::{
-    Assignment, Block, Control, Definition, FreeVars, Function, Instruction, Program, Simple, Step,
+use crate::ir_let::free_vars::FreeVars;
+use crate::ir_let::let_expr::{
+    Assignment, Block, Control, Definition, Function, Instruction, Program, Simple, Step,
     TargetAddress, VariableReference,
 };
+use crate::lang::syntax::Expr;
 use crate::result::Result;
-use crate::syntax::Expr;
 
 struct LetNormalizer {
     program: Program,

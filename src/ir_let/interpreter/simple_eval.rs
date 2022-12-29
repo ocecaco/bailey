@@ -1,11 +1,11 @@
-use crate::heap::Heap;
-use crate::heap_value::{Closure, HeapAddress, HeapValue, Tuple};
-use crate::let_expr::{
+use crate::ir_let::interpreter::heap::Heap;
+use crate::ir_let::interpreter::heap_value::{Closure, HeapAddress, HeapValue, Tuple};
+use crate::ir_let::interpreter::stack::{ReturnInfo, Stack};
+use crate::ir_let::let_expr::{
     Assignment, Control, Definition, Function, Instruction, Program, Simple, Step, TargetAddress,
     VariableReference,
 };
-use crate::stack::{ReturnInfo, Stack};
-use crate::syntax::{BinOp, Constant};
+use crate::lang::syntax::{BinOp, Constant};
 use std::collections::HashMap;
 
 #[derive(Debug)]

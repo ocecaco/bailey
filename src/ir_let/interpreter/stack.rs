@@ -1,5 +1,5 @@
-use crate::heap_value::HeapAddress;
-use crate::let_expr::TargetAddress;
+use crate::ir_let::interpreter::heap_value::HeapAddress;
+use crate::ir_let::let_expr::TargetAddress;
 
 use std::collections::HashMap;
 

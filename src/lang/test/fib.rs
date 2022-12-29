@@ -1,4 +1,4 @@
-use crate::syntax::{BinOp, Constant, Expr};
+use crate::lang::syntax::{BinOp, Constant, Expr};
 
 fn fib_helper_def() -> Expr {
     Expr::Fun {

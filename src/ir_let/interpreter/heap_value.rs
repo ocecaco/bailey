@@ -1,4 +1,4 @@
-use crate::let_expr::TargetAddress;
+use crate::ir_let::let_expr::TargetAddress;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

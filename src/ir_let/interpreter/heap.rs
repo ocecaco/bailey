@@ -1,4 +1,6 @@
-use crate::heap_value::{Closure, HeapAddress, HeapValue, RefCountedHeapValue, Tuple};
+use crate::ir_let::interpreter::heap_value::{
+    Closure, HeapAddress, HeapValue, RefCountedHeapValue, Tuple,
+};
 use std::collections::HashMap;
 
 #[derive(Debug)]
