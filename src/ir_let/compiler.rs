@@ -65,10 +65,13 @@ impl LetNormalizer {
         let new_function_index = self.program.functions.len();
         self.program.functions.push(Function { blocks: Vec::new() });
         self.current_function_index = Some(new_function_index);
+        let old_block_index = self.current_block_index;
+        self.current_block_index = None;
 
         let body_address = self.normalize_block(e)?;
 
         self.current_function_index = old_function_index;
+        self.current_block_index = old_block_index;
 
         Ok(body_address)
     }
@@ -184,6 +187,7 @@ impl LetNormalizer {
             .blocks
             .push(Block {
                 instructions: Vec::new(),
+                parent_block_index: self.current_block_index,
             });
 
         // Save the current block index so we can restore it later.

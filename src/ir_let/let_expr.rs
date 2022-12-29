@@ -59,10 +59,17 @@ pub struct Block {
     // The last instruction represents the result of evaluating the
     // entire sequence of instructions.
     pub instructions: Vec<Instruction>,
+    pub parent_block_index: Option<usize>,
 }
 
 impl fmt::Display for Block {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if let Some(parent_block_index) = self.parent_block_index {
+            write!(f, "parent block {}\n", parent_block_index)?;
+        } else {
+            write!(f, "no parent block\n")?;
+        }
+
         for instruction in self.instructions.iter() {
             write!(f, "{}\n", instruction)?;
         }
