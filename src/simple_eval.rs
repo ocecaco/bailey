@@ -1,281 +1,22 @@
-use crate::let_expr::{LetExpr, LetExprA, LetExprB, LetExprC, LetFunction};
+use crate::heap::Heap;
+use crate::heap_value::{Closure, HeapAddress, HeapValue, Tuple};
+use crate::let_expr::{
+    Assignment, Control, Definition, Function, Instruction, Program, Simple, Step, TargetAddress,
+    VariableReference,
+};
+use crate::stack::{ReturnInfo, Stack};
 use crate::syntax::{BinOp, Constant};
 use std::collections::HashMap;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct HeapAddress(u32);
-
-// Using Strings everywhere it likely not very efficient (as opposed to interning
-// or using offsets into stack frames), but this is just a proof-of-concept simple
-// implementation.
-
-#[derive(Clone)]
-struct Closure {
-    name: String,
-    arg_names: Vec<String>,
-    environment: HashMap<String, HeapAddress>,
-    body: LetExpr,
-}
-
-struct Tuple {
-    field_values: Vec<HeapAddress>,
-}
-
-enum HeapValue {
-    Int(i32),
-    Bool(bool),
-    Tuple(Tuple),
-    Closure(Closure),
-}
-
-impl HeapValue {
-    fn check_closure(&self) -> &Closure {
-        match self {
-            HeapValue::Closure(clos) => clos,
-            _ => panic!("expected closure"),
-        }
-    }
-
-    fn check_int(&self) -> i32 {
-        match self {
-            HeapValue::Int(value) => *value,
-            _ => panic!("expected int"),
-        }
-    }
-
-    fn check_bool(&self) -> bool {
-        match self {
-            HeapValue::Bool(value) => *value,
-            _ => panic!("expected bool"),
-        }
-    }
-
-    fn check_tuple(&self) -> &Tuple {
-        match self {
-            HeapValue::Tuple(tuple) => tuple,
-            _ => panic!("expected tuple"),
-        }
-    }
-
-    fn check_tuple_mut(&mut self) -> &mut Tuple {
-        match self {
-            HeapValue::Tuple(tuple) => tuple,
-            _ => panic!("expected tuple"),
-        }
-    }
-}
-
-struct RefCountedHeapValue {
-    refcount: u32,
-    heap_value: HeapValue,
-}
-
-struct Heap {
-    memory: HashMap<HeapAddress, RefCountedHeapValue>,
-    heap_next_address: HeapAddress,
-}
-
-impl Heap {
-    fn new() -> Self {
-        Heap {
-            memory: HashMap::new(),
-            heap_next_address: HeapAddress(0),
-        }
-    }
-
-    fn alloc(&mut self, heap_value: HeapValue) -> HeapAddress {
-        let address = self.heap_next_address;
-        self.heap_next_address = HeapAddress(self.heap_next_address.0 + 1);
-        let refcounted = RefCountedHeapValue {
-            refcount: 0,
-            heap_value,
-        };
-        self.memory.insert(address, refcounted);
-        address
-    }
-
-    fn free(&mut self, heap_address: HeapAddress) {
-        let destroying_value = self
-            .memory
-            .remove(&heap_address)
-            .expect("attempt to free invalid pointer")
-            .heap_value;
-
-        match destroying_value {
-            HeapValue::Int(_) => {}
-            HeapValue::Bool(_) => {}
-            HeapValue::Tuple(Tuple { field_values }) => {
-                for addr in field_values {
-                    self.dec_refcount(addr);
-                }
-            }
-            HeapValue::Closure(Closure { environment, .. }) => {
-                for addr in environment.values() {
-                    self.dec_refcount(*addr);
-                }
-            }
-        }
-    }
-
-    fn free_block_frame(&mut self, block_frame: BlockFrame) {
-        for addr in block_frame.values {
-            self.dec_refcount(addr);
-        }
-    }
-
-    // TODO: Alternative, could just ensure that there are no more block frames
-    // left when the function exits. Seems like that might be the case anyway in
-    // the current implementation (need to check).
-    fn free_stack_frame(&mut self, stack_frame: CallStackFrame) {
-        for block_frame in stack_frame.nested_block_frames {
-            self.free_block_frame(block_frame)
-        }
-    }
-
-    fn deref(&self, heap_address: HeapAddress) -> &HeapValue {
-        &self.memory[&heap_address].heap_value
-    }
-
-    fn deref_mut(&mut self, heap_address: HeapAddress) -> &mut HeapValue {
-        &mut self
-            .memory
-            .get_mut(&heap_address)
-            .expect("invalid pointer")
-            .heap_value
-    }
-
-    // TODO: Reference counting is not actively used for now in the
-    // interpreter since there was a bug with destruction of intermediate values.
-    fn inc_refcount(&mut self, heap_address: HeapAddress) {
-        let refcounted = &mut self.memory.get_mut(&heap_address).expect("invalid pointer");
-        refcounted.refcount += 1;
-    }
-
-    fn dec_refcount(&mut self, heap_address: HeapAddress) {
-        let new_refcount = {
-            let refcounted = &mut self.memory.get_mut(&heap_address).expect("invalid pointer");
-            refcounted.refcount -= 1;
-            refcounted.refcount
-        };
-
-        if new_refcount == 0 {
-            self.free(heap_address);
-        }
-    }
-}
-
-struct BlockFrame {
-    values: Vec<HeapAddress>,
-    variable_offsets: HashMap<String, usize>,
-}
-
-impl BlockFrame {
-    fn new() -> Self {
-        BlockFrame {
-            values: Vec::new(),
-            variable_offsets: HashMap::new(),
-        }
-    }
-
-    fn lookup_var(&self, name: &str) -> Option<HeapAddress> {
-        let offset = self.variable_offsets.get(name);
-
-        if let Some(offset) = offset {
-            Some(*self.values.get(*offset).expect("stack index out of range"))
-        } else {
-            None
-        }
-    }
-
-    fn set_var(&mut self, name: String, value: HeapAddress) {
-        let new_offset = self.values.len();
-        self.values.push(value);
-        self.variable_offsets.insert(name, new_offset);
-    }
-}
-
-struct CallStackFrame {
-    nested_block_frames: Vec<BlockFrame>,
-}
-
-impl CallStackFrame {
-    fn new() -> Self {
-        CallStackFrame {
-            nested_block_frames: vec![BlockFrame::new()],
-        }
-    }
-
-    fn enter_block(&mut self) {
-        self.nested_block_frames.push(BlockFrame::new())
-    }
-
-    fn exit_block(&mut self) -> BlockFrame {
-        self.nested_block_frames
-            .pop()
-            .expect("exiting block while no more block frames")
-    }
-
-    fn current_block_mut(&mut self) -> &mut BlockFrame {
-        self.nested_block_frames
-            .last_mut()
-            .expect("expected active block")
-    }
-
-    fn lookup_var(&self, name: &str) -> HeapAddress {
-        // Walk backwards from the innermost block frame to the outermost
-        // one to find the lexically closest one that binds the variable we are looking for.
-        for frame in self.nested_block_frames.iter().rev() {
-            if let Some(value) = frame.lookup_var(name) {
-                return value;
-            }
-        }
-
-        panic!("could not find variable in stack frame")
-    }
-
-    fn set_var_no_refcount(&mut self, name: String, value: HeapAddress) {
-        self.current_block_mut().set_var(name, value);
-    }
-}
-
-struct Stack {
-    frames: Vec<CallStackFrame>,
-}
-
-impl Stack {
-    fn new() -> Self {
-        Stack {
-            frames: vec![CallStackFrame::new()],
-        }
-    }
-
-    fn enter_function(&mut self) {
-        self.frames.push(CallStackFrame::new());
-    }
-
-    fn exit_function(&mut self) -> CallStackFrame {
-        self.frames
-            .pop()
-            .expect("stack should not be empty during popping")
-    }
-
-    fn current_frame_mut(&mut self) -> &mut CallStackFrame {
-        self.frames.last_mut().expect("stack should not be empty")
-    }
-
-    fn current_frame(&self) -> &CallStackFrame {
-        self.frames.last().expect("stack should not be empty")
-    }
-}
-
-struct SimpleEvaluator {
+#[derive(Debug)]
+struct InstructionEvaluator {
     heap: Heap,
     stack: Stack,
 }
 
-impl SimpleEvaluator {
+impl InstructionEvaluator {
     fn new() -> Self {
-        SimpleEvaluator {
+        InstructionEvaluator {
             heap: Heap::new(),
             stack: Stack::new(),
         }
@@ -283,9 +24,7 @@ impl SimpleEvaluator {
 
     fn set_var(&mut self, name: String, address: HeapAddress) {
         self.heap.inc_refcount(address);
-        self.stack
-            .current_frame_mut()
-            .set_var_no_refcount(name, address);
+        self.stack.set_var_no_refcount(name, address);
     }
 
     fn eval_binop(
@@ -322,19 +61,19 @@ impl SimpleEvaluator {
         }
     }
 
-    fn eval_atomic(&mut self, e: &LetExprA) -> HeapAddress {
-        self.stack.current_frame().lookup_var(&e.var_name)
+    fn eval_var(&mut self, e: &VariableReference) -> HeapAddress {
+        self.stack.lookup_var(&e.var_name)
     }
 
-    fn eval_complex(&mut self, e: &LetExprC) -> HeapAddress {
+    fn eval_simple(&mut self, e: &Simple) -> HeapAddress {
         match e {
-            LetExprC::Literal(Constant::Int { value }) => self.heap.alloc(HeapValue::Int(*value)),
-            LetExprC::Literal(Constant::Bool { value }) => self.heap.alloc(HeapValue::Bool(*value)),
-            LetExprC::Tuple { args } => {
+            Simple::Literal(Constant::Int { value }) => self.heap.alloc(HeapValue::Int(*value)),
+            Simple::Literal(Constant::Bool { value }) => self.heap.alloc(HeapValue::Bool(*value)),
+            Simple::Tuple { args } => {
                 let mut field_values = Vec::new();
 
                 for arg in args {
-                    let value_addr = self.eval_atomic(arg);
+                    let value_addr = self.eval_var(arg);
                     field_values.push(value_addr);
                 }
 
@@ -344,7 +83,7 @@ impl SimpleEvaluator {
 
                 self.heap.alloc(HeapValue::Tuple(Tuple { field_values }))
             }
-            LetExprC::Fun(LetFunction {
+            Simple::Fun(Function {
                 name,
                 arg_names,
                 free_names,
@@ -353,7 +92,7 @@ impl SimpleEvaluator {
                 let mut closure_environment = HashMap::new();
 
                 for free_name in free_names {
-                    let value_addr = self.stack.current_frame().lookup_var(free_name);
+                    let value_addr = self.stack.lookup_var(free_name);
 
                     closure_environment.insert(free_name.clone(), value_addr);
                 }
@@ -366,63 +105,21 @@ impl SimpleEvaluator {
                     name: name.clone(),
                     arg_names: arg_names.clone(),
                     environment: closure_environment,
-                    body: body.as_ref().clone(),
+                    body: *body,
                 }))
             }
-            LetExprC::Call { func, args } => {
-                let closure_address = self.eval_atomic(func);
-
-                let mut arg_values = Vec::new();
-                for arg in args {
-                    arg_values.push(self.eval_atomic(arg));
-                }
-
-                // TODO: Cloning the closure is relatively inefficient because
-                // it contains a potentially large expression. Doing it anyway
-                // for now since I will refactor it later to not store a copy of
-                // the expression in the closure but rather a code pointer of
-                // some kind.
-                let closure = self.heap.deref(closure_address).check_closure().clone();
-
-                if closure.arg_names.len() != args.len() {
-                    panic!("incorrect number of arguments");
-                }
-
-                self.stack.enter_function();
-
-                for (name, value) in closure.environment.iter() {
-                    self.set_var(name.clone(), *value);
-                }
-
-                for (name, arg_value) in closure.arg_names.iter().zip(arg_values) {
-                    self.set_var(name.clone(), arg_value);
-                }
-
-                // Allow the function to recursively calling itself by inserting
-                // a pointer to its own closure into its environment when
-                // calling it.
-                self.set_var(closure.name.clone(), closure_address);
-
-                let result = self.eval_block(&closure.body);
-
-                // TODO: This still uses the host stack, switch to a fully iterative interpreter implementation.
-                let frame = self.stack.exit_function();
-                self.heap.free_stack_frame(frame);
-
-                result
-            }
-            LetExprC::BinOp { op, lhs, rhs } => {
-                let lhs_address = self.eval_atomic(lhs);
-                let rhs_address = self.eval_atomic(rhs);
+            Simple::BinOp { op, lhs, rhs } => {
+                let lhs_address = self.eval_var(lhs);
+                let rhs_address = self.eval_var(rhs);
                 self.eval_binop(*op, lhs_address, rhs_address)
             }
-            LetExprC::Set {
+            Simple::Set {
                 tuple,
                 index,
                 new_value,
             } => {
-                let tuple_address = self.eval_atomic(tuple);
-                let new_value = self.eval_atomic(new_value);
+                let tuple_address = self.eval_var(tuple);
+                let new_value = self.eval_var(new_value);
 
                 let tuple = self.heap.deref_mut(tuple_address).check_tuple_mut();
 
@@ -442,53 +139,182 @@ impl SimpleEvaluator {
                     field_values: Vec::new(),
                 }))
             }
-            LetExprC::If {
+        }
+    }
+
+    fn eval_control(&mut self, control: &Control, return_info: ReturnInfo) -> TargetAddress {
+        match control {
+            Control::Call { func, args } => {
+                let closure_address = self.eval_var(func);
+
+                let mut arg_values = Vec::new();
+                for arg in args {
+                    arg_values.push(self.eval_var(arg));
+                }
+
+                let closure = self.heap.deref(closure_address).check_closure().clone();
+
+                if closure.arg_names.len() != args.len() {
+                    panic!("incorrect number of arguments");
+                }
+
+                self.stack.enter_function(return_info);
+
+                for (name, value) in closure.environment.iter() {
+                    self.set_var(name.clone(), *value);
+                }
+
+                for (name, arg_value) in closure.arg_names.iter().zip(arg_values) {
+                    self.set_var(name.clone(), arg_value);
+                }
+
+                // Allow the function to recursively calling itself by inserting
+                // a pointer to its own closure into its environment when
+                // calling it.
+                self.set_var(closure.name.clone(), closure_address);
+
+                closure.body
+            }
+            Control::If {
                 condition,
                 branch_success,
                 branch_failure,
             } => {
-                let condition_address = self.eval_atomic(condition);
+                let condition_address = self.eval_var(condition);
                 let condition_value = self.heap.deref(condition_address).check_bool();
 
                 if condition_value {
-                    self.eval_block(branch_success)
+                    *branch_success
                 } else {
-                    self.eval_block(branch_failure)
+                    *branch_failure
                 }
             }
         }
     }
 
-    fn eval_rhs(&mut self, e: &LetExprB) -> HeapAddress {
-        match e {
-            LetExprB::Atomic(e_atomic) => self.eval_atomic(e_atomic),
-            LetExprB::Complex(e_complex) => self.eval_complex(e_complex),
+    fn eval_instruction(
+        &mut self,
+        address: TargetAddress,
+        instruction: &Assignment,
+    ) -> TargetAddress {
+        match &instruction.definition {
+            Definition::Var(var) => {
+                let value = self.eval_var(&var);
+                self.set_var(instruction.name.clone(), value);
+                address.next()
+            }
+            Definition::Step(Step::Simple(simple)) => {
+                let value = self.eval_simple(&simple);
+                self.set_var(instruction.name.clone(), value);
+                address.next()
+            }
+            Definition::Step(Step::Control(control)) => {
+                let return_info = ReturnInfo {
+                    result_variable: instruction.name.clone(),
+                    return_address: address.next(),
+                };
+                self.eval_control(&control, return_info)
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ProgramEvaluator {
+    program: Program,
+    instruction_evaluator: InstructionEvaluator,
+    program_counter: TargetAddress,
+}
+
+impl ProgramEvaluator {
+    pub fn new(program: Program) -> Self {
+        ProgramEvaluator {
+            program,
+            instruction_evaluator: InstructionEvaluator::new(),
+            program_counter: TargetAddress {
+                block_index: 0,
+                instruction_index: 0,
+            },
         }
     }
 
-    fn eval_block(&mut self, e: &LetExpr) -> HeapAddress {
-        self.stack.current_frame_mut().enter_block();
+    pub fn run(&mut self) -> HeapValue {
+        loop {
+            let result = self.step();
 
-        let (last_instruction, initial_instructions) = e
-            .let_bindings
-            .split_last()
-            .expect("should be at least one instruction");
-
-        for instruction in initial_instructions {
-            let new_var_value = self.eval_rhs(&instruction.definition);
-
-            self.set_var(instruction.name.clone(), new_var_value);
+            if let Some(result) = result {
+                return result;
+            }
         }
+    }
 
-        let block_return_value = self.eval_rhs(&last_instruction.definition);
-        // We do not assign the block return value to a local variable in the stack frame,
-        // so that its reference count does not get decreased when the frame is destroyed,
-        // since that would lead to immediate destruction of the result value.
+    fn step(&mut self) -> Option<HeapValue> {
+        println!("PC: {:?}", self.program_counter);
 
-        // TODO: Stop using host stack, use iterative implementation
-        let frame = self.stack.current_frame_mut().exit_block();
-        self.heap.free_block_frame(frame);
+        let current_instruction = self.program.get_instruction(self.program_counter);
 
-        block_return_value
+        println!("instruction: {:?}", current_instruction);
+
+        match current_instruction {
+            Instruction::EnterBlock => {
+                self.program_counter = self.program_counter.next();
+                None
+            }
+            Instruction::ExitBlock(return_var) => {
+                // If there is no return address, the program is finished and we
+                // can return the final value from this function.
+                let block = self.instruction_evaluator.stack.exit_block();
+
+                let return_value = block
+                    .lookup_var(&return_var.var_name)
+                    .expect("could not find return value of block in block local variables");
+
+                // TODO: Some code duplication here
+                match block.return_info {
+                    None => {
+                        let result = self.instruction_evaluator.heap.deref(return_value).clone();
+
+                        // Decrease reference counts on the locals that are
+                        // going out of scope. In the current implementation,
+                        // this can only happen after we have assigned the
+                        // return value into the caller stack frame, since doing
+                        // that will increment the reference count, keeping the
+                        // return value alive instead of potentially destroying
+                        // it at the block exit.
+                        for address in &block.values {
+                            self.instruction_evaluator.heap.dec_refcount(*address);
+                        }
+
+                        Some(result)
+                    }
+                    Some(return_info) => {
+                        // Put the return value into the caller's stack frame.
+                        self.instruction_evaluator
+                            .set_var(return_info.result_variable, return_value);
+
+                        // Decrease reference counts on the locals that are
+                        // going out of scope. In the current implementation,
+                        // this can only happen after we have assigned the
+                        // return value into the caller stack frame, since doing
+                        // that will increment the reference count, keeping the
+                        // return value alive instead of potentially destroying
+                        // it at the block exit.
+                        for address in &block.values {
+                            self.instruction_evaluator.heap.dec_refcount(*address);
+                        }
+
+                        self.program_counter = return_info.return_address;
+                        None
+                    }
+                }
+            }
+            Instruction::Assignment(assignment) => {
+                let next_address = self
+                    .instruction_evaluator
+                    .eval_instruction(self.program_counter, assignment);
+                self.program_counter = next_address;
+                None
+            }
+        }
     }
 }
