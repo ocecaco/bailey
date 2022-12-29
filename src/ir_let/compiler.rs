@@ -5,12 +5,14 @@ use crate::ir_let::let_expr::{
 };
 use crate::lang::syntax::Expr;
 use crate::result::Result;
+use std::collections::HashMap;
 
 struct LetNormalizer {
     program: Program,
     current_function_index: Option<usize>,
     current_block_index: Option<usize>,
     var_counter: u64,
+    var_substitution: HashMap<String, String>,
 }
 
 impl LetNormalizer {
@@ -22,16 +24,51 @@ impl LetNormalizer {
             current_function_index: None,
             current_block_index: None,
             var_counter: 0,
+            var_substitution: HashMap::new(),
         }
     }
 
     // TODO: Implement more efficient/less hacky variable generation (probably
     // want to do interning anyway instead of having String all over the place).
-    fn fresh(&mut self) -> String {
-        let x = String::from("__gen");
+    fn fresh(&mut self, base_name: &str) -> String {
         let count = self.var_counter;
         self.var_counter += 1;
-        x + &count.to_string()
+        base_name.to_owned() + "__" + &count.to_string()
+    }
+
+    fn with_substitution<F, R>(&mut self, from: String, to: String, f: F) -> R
+    where
+        F: FnOnce(&mut LetNormalizer) -> R,
+    {
+        let old_substitution = self.var_substitution.remove(&from);
+        self.var_substitution.insert(from.clone(), to);
+
+        let result = f(self);
+
+        if let Some(old_to) = old_substitution {
+            self.var_substitution.insert(from, old_to);
+        } else {
+            self.var_substitution.remove(&from);
+        }
+
+        result
+    }
+
+    fn with_substitutions<F, R>(
+        &mut self,
+        mut reverse_substitutions: Vec<(String, String)>,
+        f: F,
+    ) -> R
+    where
+        F: FnOnce(&mut LetNormalizer) -> R,
+    {
+        if let Some((from, to)) = reverse_substitutions.pop() {
+            self.with_substitution(from, to, |comp| {
+                comp.with_substitutions(reverse_substitutions, f)
+            })
+        } else {
+            f(self)
+        }
     }
 
     fn emit(&mut self, instruction: Instruction) {
@@ -50,7 +87,7 @@ impl LetNormalizer {
         match norm_rhs {
             Definition::Var(expr_at) => Ok(expr_at),
             Definition::Step(step) => {
-                let var_name = self.fresh();
+                let var_name = self.fresh("__gen");
                 self.emit(Instruction::Assignment(Assignment {
                     name: var_name.clone(),
                     definition: Definition::Step(step),
@@ -80,25 +117,48 @@ impl LetNormalizer {
         match e {
             Expr::Literal(c) => Ok(Definition::Step(Step::Simple(Simple::Literal(*c)))),
             Expr::Var { var_name } => Ok(Definition::Var(VariableReference {
-                var_name: var_name.clone(),
+                var_name: self
+                    .var_substitution
+                    .get(var_name)
+                    .expect("could not find substitution")
+                    .clone(),
             })),
             Expr::Fun {
-                name,
-                arg_names,
+                name: original_name,
+                arg_names: original_arg_names,
                 body,
             } => {
-                let function_body_address = self.normalize_function_body(body)?;
+                let unique_name = self.fresh(original_name);
+
+                let mut arg_substitutions = Vec::new();
+                let mut unique_arg_names = Vec::new();
+                for original_arg_name in original_arg_names.iter().rev() {
+                    let unique_arg_name = self.fresh(original_arg_name);
+                    arg_substitutions.push((original_arg_name.clone(), unique_arg_name.clone()));
+                    unique_arg_names.push(unique_arg_name);
+                }
+                unique_arg_names.reverse();
+
+                let function_body_address = self.with_substitutions(arg_substitutions, |comp| {
+                    comp.with_substitution(original_name.clone(), unique_name.clone(), |comp| {
+                        comp.normalize_function_body(body)
+                    })
+                })?;
 
                 let freevars = FreeVars::free_vars_function(
                     &self.program.functions[function_body_address.function_index].blocks,
-                    &name,
-                    &arg_names,
+                    &unique_name,
+                    &unique_arg_names,
                     function_body_address.block_index,
-                );
+                )
+                .iter()
+                .map(|&x| x.to_owned())
+                .collect();
+
                 let function = AllocClosure {
-                    name: name.clone(),
-                    arg_names: arg_names.clone(),
-                    free_names: freevars.iter().map(|&x| x.to_owned()).collect(),
+                    name: unique_name,
+                    arg_names: unique_arg_names,
+                    free_names: freevars,
                     body: function_body_address,
                 };
 
@@ -125,16 +185,20 @@ impl LetNormalizer {
                 })))
             }
             Expr::Let {
-                name,
+                name: original_name,
                 definition,
                 body,
             } => {
                 let def_c = self.normalize_rhs(definition)?;
+                let unique_name = self.fresh(original_name);
                 self.emit(Instruction::Assignment(Assignment {
-                    name: name.clone(),
+                    name: unique_name.clone(),
                     definition: def_c,
                 }));
-                self.normalize_rhs(body)
+
+                self.with_substitution(original_name.clone(), unique_name, |comp| {
+                    comp.normalize_rhs(body)
+                })
             }
             Expr::If {
                 condition,
