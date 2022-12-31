@@ -39,6 +39,12 @@ impl fmt::Display for Program {
 
 #[derive(Debug, Clone)]
 pub struct Function {
+    pub name: String,
+    pub arg_names: Vec<String>,
+    // TODO: This should never be None after the compiler is done constructing
+    // the function. Could enforce that in the type, but would require tweaking
+    // compiler internals a bit.
+    pub free_names: Option<Vec<String>>,
     pub blocks: Vec<Block>,
 }
 
@@ -60,6 +66,23 @@ pub struct Block {
     // entire sequence of instructions.
     pub instructions: Vec<Instruction>,
     pub parent_block_index: Option<usize>,
+}
+
+impl Block {
+    pub fn block_names(&self) -> Vec<String> {
+        let mut result = Vec::new();
+
+        for instruction in &self.instructions {
+            match instruction {
+                Instruction::Assignment(Assignment { name, .. }) => {
+                    result.push(name.clone());
+                }
+                _ => {}
+            }
+        }
+
+        result
+    }
 }
 
 impl fmt::Display for Block {

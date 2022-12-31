@@ -97,20 +97,49 @@ impl LetNormalizer {
         }
     }
 
-    fn normalize_function_body(&mut self, e: &Expr) -> Result<TargetAddress> {
+    fn normalize_function_body(
+        &mut self,
+        name: String,
+        arg_names: Vec<String>,
+        e: &Expr,
+    ) -> Result<AllocClosure> {
         let old_function_index = self.current_function_index;
         let new_function_index = self.program.functions.len();
-        self.program.functions.push(Function { blocks: Vec::new() });
+        self.program.functions.push(Function {
+            name: name.clone(),
+            arg_names: arg_names.clone(),
+            free_names: None,
+            blocks: Vec::new(),
+        });
         self.current_function_index = Some(new_function_index);
         let old_block_index = self.current_block_index;
         self.current_block_index = None;
 
         let body_address = self.normalize_block(e)?;
 
+        let freevars: Vec<String> = FreeVars::free_vars_function(
+            &self.program.functions[new_function_index].blocks,
+            &name,
+            &arg_names,
+            body_address.block_index,
+        )
+        .iter()
+        .map(|&x| x.to_owned())
+        .collect();
+
+        self.program.functions[new_function_index].free_names = Some(freevars.clone());
+
+        let function = AllocClosure {
+            name,
+            arg_names,
+            free_names: freevars,
+            body: body_address,
+        };
+
         self.current_function_index = old_function_index;
         self.current_block_index = old_block_index;
 
-        Ok(body_address)
+        Ok(function)
     }
 
     fn normalize_rhs(&mut self, e: &Expr) -> Result<Definition> {
@@ -139,28 +168,15 @@ impl LetNormalizer {
                 }
                 unique_arg_names.reverse();
 
-                let function_body_address = self.with_substitutions(arg_substitutions, |comp| {
+                let function = self.with_substitutions(arg_substitutions, |comp| {
                     comp.with_substitution(original_name.clone(), unique_name.clone(), |comp| {
-                        comp.normalize_function_body(body)
+                        comp.normalize_function_body(
+                            unique_name.clone(),
+                            unique_arg_names.clone(),
+                            body,
+                        )
                     })
                 })?;
-
-                let freevars = FreeVars::free_vars_function(
-                    &self.program.functions[function_body_address.function_index].blocks,
-                    &unique_name,
-                    &unique_arg_names,
-                    function_body_address.block_index,
-                )
-                .iter()
-                .map(|&x| x.to_owned())
-                .collect();
-
-                let function = AllocClosure {
-                    name: unique_name,
-                    arg_names: unique_arg_names,
-                    free_names: freevars,
-                    body: function_body_address,
-                };
 
                 Ok(Definition::Step(Step::Simple(Simple::Fun(function))))
             }
@@ -273,7 +289,7 @@ impl LetNormalizer {
     }
 
     fn normalize_program(mut self, e: &Expr) -> Result<Program> {
-        self.normalize_function_body(e)?;
+        self.normalize_function_body("toplevel".to_owned(), vec![], e)?;
         Ok(self.program)
     }
 }
