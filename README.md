@@ -1,7 +1,7 @@
 # Bailey
-This is a work-in-progress implementation of Bailey, a simple dynamically, strictly-evaluated, reference-counted programming language.
+This is a work-in-progress implementation of Bailey, a simple dynamically-typed, strictly-evaluated programming language where memory management is handled using reference counting.
 
-I started this side project in December 2022, mostly as a way to experiment with compiling a functional language all the way to assembly with proper memory management (based on reference counting).
+I started this project in December 2022, mostly as a way to experiment with compiling a functional language all the way to assembly with proper memory management (based on reference counting).
 
 ## Features currently implemented
 * The source language is an untyped lambda calculus with let bindings, with heap-allocated tuples, integers and booleans as basic data types.
